@@ -116,17 +116,38 @@ class TestVarProRegressor(unittest.TestCase):
         after = list(model.feature_net.parameters())
         self.assertIsInstance(loss, float)
         self.assertTrue(any(not torch.allclose(a, b) for a, b in zip(after, before)))
-        self.assertFalse(model.W.requires_grad)
+        self.assertTrue(model.W.requires_grad)
 
     def test_sparse_step_produces_sparse_readout(self):
         model = VarProRegressor(_feature_net(), feature_dim=8, output_dim=2)
-        optimizer = torch.optim.Adam(model.feature_net.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         X = torch.randn(32, 4)
         Y = torch.randn(32, 2)
         for _ in range(5):
             model.step(X, Y, optimizer, sparse_penalty="l1", sparsity=1.0, ridge=0.0)
         sparsity_ratio = (model.W.abs() < 1e-6).float().mean().item()
         self.assertGreater(sparsity_ratio, 0.1)
+
+    def test_sparse_step_updates_readout_after_inner_solve(self):
+        model = VarProRegressor(_feature_net(), feature_dim=8, output_dim=2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+        X = torch.randn(16, 4)
+        Y = torch.randn(16, 2)
+        projected = solve_sparse_readout(
+            model.feature_net(X).detach(), Y, sparsity=1e-2, ridge=1e-3,
+            bias=True, max_iter=10,
+        )
+        model.step(X, Y, optimizer, sparse_penalty="l1", sparsity=1e-2,
+                   ridge=1e-3, sparse_max_iter=10)
+        actual = torch.cat([model.W.detach(), model.b.detach().unsqueeze(0)], dim=0)
+        self.assertFalse(torch.allclose(actual, projected))
+
+    def test_sparse_step_requires_readout_in_optimizer(self):
+        model = VarProRegressor(_feature_net(), feature_dim=8, output_dim=2)
+        optimizer = torch.optim.SGD(model.feature_net.parameters(), lr=1e-2)
+        with self.assertRaisesRegex(ValueError, "must include the readout"):
+            model.step(torch.randn(8, 4), torch.randn(8, 2), optimizer,
+                       sparse_penalty="l1")
 
     def test_fit_readout_from_loader(self):
         feature_net = _feature_net()
@@ -163,7 +184,7 @@ class TestVarProClassifier(unittest.TestCase):
 
     def test_step_updates_feature_net(self):
         model = VarProClassifier(_feature_net(), feature_dim=8, num_classes=3)
-        optimizer = torch.optim.Adam(model.feature_net.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         X = torch.randn(9, 4)
         y = torch.randint(0, 3, (9,))
         before = [p.detach().clone() for p in model.feature_net.parameters()]
@@ -171,15 +192,21 @@ class TestVarProClassifier(unittest.TestCase):
         after = list(model.feature_net.parameters())
         self.assertIsInstance(loss, float)
         self.assertTrue(any(not torch.allclose(a, b) for a, b in zip(after, before)))
-        self.assertFalse(model.W.requires_grad)
+        self.assertTrue(model.W.requires_grad)
 
     def test_step_newton_cg(self):
         model = VarProClassifier(_feature_net(), feature_dim=8, num_classes=3)
-        optimizer = torch.optim.Adam(model.feature_net.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         X = torch.randn(9, 4)
         y = torch.randint(0, 3, (9,))
         loss = model.step(X, y, optimizer, ridge=1e-2, inner_iter=2, inner_solver="newton_cg", cg_max_iter=5)
         self.assertIsInstance(loss, float)
+
+    def test_step_requires_readout_in_optimizer(self):
+        model = VarProClassifier(_feature_net(), feature_dim=8, num_classes=3)
+        optimizer = torch.optim.Adam(model.feature_net.parameters(), lr=1e-3)
+        with self.assertRaisesRegex(ValueError, "must include the readout"):
+            model.step(torch.randn(9, 4), torch.randint(0, 3, (9,)), optimizer)
 
 
 class TestFinalLinearAPI(unittest.TestCase):

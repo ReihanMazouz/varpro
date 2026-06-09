@@ -22,15 +22,34 @@ Then add `torch_varpro/` to your Python path (or install as a local package).
 
 ## Core concept
 
+<p align="center">
+  <img src="assets/varpro_illustration_complex_surface.png"
+       alt="Variable Projection optimization on a complex loss surface"
+       width="850">
+  <br>
+  <em>For an exact ridge readout, the blue outer steps coincide with the
+  ideal reduced path.</em>
+</p>
+
 For a model `f(X) = φ(X; θ) W + b`, the VarPro step decomposes as:
 
 ```
-W★ = argmin_W  loss(φ(X; θ) W, Y)      ← solved analytically
-θ  ← θ - lr · ∇_θ loss(φ(X; θ) W★, Y) ← standard gradient step
+W★ = argmin_W  L(θ, W)                 ← exact or iterative inner solve
+(θ, W) ← optimizer_step(L; θ, W★)      ← outer full-model gradient step
 ```
 
-The key: **gradients never flow through the readout solve**, so `W` is not a
-parameter passed to the optimizer.
+When the inner problem is solved to stationarity, `∂_W L(θ, W★) = 0`.
+The envelope theorem then gives the gradient of the reduced objective
+`L(θ, W★(θ))` from the partial derivative with `W★` held fixed. This is the
+classic ridge case: `W` does not need to be passed to the outer optimizer, and
+no gradient needs to flow through the readout solve. Note that it is the
+gradient with respect to `W`, not necessarily the loss itself, that is zero.
+
+The implementation uses this reduced update only for exact ridge. In the other
+cases, it first refines `W` toward `W★` with the appropriate inner solver, then
+uses that result as the starting point for an ordinary gradient step on the
+complete model `(θ, W)`. The outer optimizer must therefore include the
+readout parameters for sparse and cross-entropy VarPro.
 
 ---
 
@@ -45,7 +64,7 @@ from torch_varpro import VarProRegressor
 
 feature_net = nn.Sequential(nn.Linear(784, 256), nn.ReLU(), nn.Linear(256, 128), nn.ReLU())
 model = VarProRegressor(feature_net, feature_dim=128, output_dim=10)
-optimizer = torch.optim.Adam(model.feature_net.parameters(), lr=1e-3)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 for X_batch, Y_batch in train_loader:   # Y_batch must be float (N, C), not class indices
     loss = model.step(X_batch, Y_batch, optimizer, ridge=1e-4)
@@ -70,7 +89,7 @@ from torch_varpro import VarProClassifier
 
 feature_net = nn.Sequential(nn.Linear(784, 256), nn.ReLU())
 model = VarProClassifier(feature_net, feature_dim=256, num_classes=10)
-optimizer = torch.optim.Adam(model.feature_net.parameters(), lr=1e-3)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 for X_batch, y_batch in train_loader:   # y_batch = integer class labels
     loss = model.step(X_batch, y_batch, optimizer, ridge=1e-2)
@@ -229,9 +248,9 @@ For each batch (X, Y):
   │  CE:       W★ = argmin CE(φW+b, y) + λ||W||²        (L-BFGS)         │
   └───────────────────────────────────────────────────────────────────────┘
   ┌── Outer gradient step ────────────────────────────────────────────────┐
-  │  φ_grad = feature_net(X)         ← recompute with gradient           │
-  │  loss = loss_fn(φ_grad @ W★, Y)  ← W★ is a constant here            │
-  │  loss.backward()                  ← gradient w.r.t. feature_net only │
-  │  optimizer.step()                                                     │
+  │  Set the model readout to W★                                         │
+  │  loss = full_objective(model(X), Y)                                  │
+  │  loss.backward()                                                     │
+  │  optimizer.step()  ← θ only for exact ridge; θ and W otherwise      │
   └───────────────────────────────────────────────────────────────────────┘
 ```

@@ -7,8 +7,9 @@ import torch.nn as nn
 class VarProRegressor(nn.Module):
     """Feature network with an analytically-optimal linear readout (MSE).
 
-    The readout weights ``W`` and ``b`` are stored as non-differentiable
-    buffers; they are updated by the VarPro solve, not by backprop.
+    The readout weights ``W`` and ``b`` are trainable parameters. Ridge VarPro
+    projects them exactly and suppresses their outer gradient; sparse VarPro
+    initializes them with the inner solve and then updates the complete model.
 
     Args:
         feature_net: Any ``nn.Module`` mapping inputs to a feature vector.
@@ -19,7 +20,7 @@ class VarProRegressor(nn.Module):
     Usage::
 
         model = VarProRegressor(my_net, feature_dim=128, output_dim=1)
-        optimizer = torch.optim.Adam(model.feature_net.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
         for X_batch, Y_batch in loader:
             loss = model.step(X_batch, Y_batch, optimizer)
@@ -36,8 +37,8 @@ class VarProRegressor(nn.Module):
         self.feature_dim = feature_dim
         self.output_dim = output_dim
         self.bias = bias
-        self.register_buffer("W", torch.zeros(feature_dim, output_dim))
-        self.register_buffer("b", torch.zeros(output_dim) if bias else None)
+        self.W = nn.Parameter(torch.zeros(feature_dim, output_dim))
+        self.b = nn.Parameter(torch.zeros(output_dim)) if bias else None
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         pred = self.feature_net(X) @ self.W
@@ -132,8 +133,8 @@ class VarProRegressor(nn.Module):
 class VarProClassifier(nn.Module):
     """Feature network with an analytically-optimal softmax readout (CE).
 
-    The readout ``W`` and ``b`` are non-differentiable buffers solved by an
-    inner convex optimization (L-BFGS or Newton-CG) at each step.
+    The readout ``W`` and ``b`` are initialized by an inner convex solve, then
+    updated together with the feature network by the outer optimizer.
 
     Args:
         feature_net: Any ``nn.Module`` mapping inputs to a feature vector.
@@ -143,7 +144,7 @@ class VarProClassifier(nn.Module):
     Usage::
 
         model = VarProClassifier(my_net, feature_dim=128, num_classes=10)
-        optimizer = torch.optim.Adam(model.feature_net.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
         for X_batch, y_batch in loader:
             loss = model.step(X_batch, y_batch, optimizer)
@@ -154,8 +155,8 @@ class VarProClassifier(nn.Module):
         self.feature_net = feature_net
         self.feature_dim = feature_dim
         self.num_classes = num_classes
-        self.register_buffer("W", torch.zeros(feature_dim, num_classes))
-        self.register_buffer("b", torch.zeros(num_classes))
+        self.W = nn.Parameter(torch.zeros(feature_dim, num_classes))
+        self.b = nn.Parameter(torch.zeros(num_classes))
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         return self.feature_net(X) @ self.W + self.b

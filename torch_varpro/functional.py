@@ -3,13 +3,14 @@
 Each function performs a single VarPro optimization step:
   1. Compute features phi(X).
   2. Solve for the optimal linear readout W* on the **detached** features.
-  3. Set W* into the model (no gradient on W).
-  4. Compute the loss with W* fixed, backprop through phi(X), step the optimizer.
+  3. Set W* into the model.
+  4. For exact ridge, update only phi; otherwise update the whole model,
+     including the readout initialized at W*.
 
 Two model conventions are supported:
 
 * **VarProRegressor / VarProClassifier** — explicit ``feature_net`` + separate
-  ``W`` / ``b`` buffers.
+  trainable ``W`` / ``b`` parameters.
 * **nn.Sequential-ended** — any ``model`` whose ``model.net`` is an
   ``nn.Sequential`` ending in ``nn.Linear``; VarPro intercepts that final layer.
 """
@@ -105,8 +106,8 @@ def varpro_sparse_step(
 ) -> float:
     """One VarPro step with a sparse proximal readout solve.
 
-    The readout is solved with an l1 or l1/2 penalty (FISTA or IRLS),
-    then held fixed during the backward pass.
+    The readout is initialized by an l1 or l1/2 inner solve (FISTA or IRLS),
+    then updated with the feature network during the outer backward pass.
 
     Args:
         sparsity: Sparsity regularization weight (lambda).
@@ -169,6 +170,7 @@ def varpro_ce_step(
     """
     if not _is_wrapper(model):
         raise ValueError("varpro_ce_step requires a VarProClassifier with feature_net, W, b.")
+    _require_optimizer_params(optimizer, model.W, model.b)
 
     optimizer.zero_grad(set_to_none=True)
     features = model.feature_net(X)
@@ -184,8 +186,10 @@ def varpro_ce_step(
         model.W.copy_(W_star)
         model.b.copy_(b_star)
 
-    logits = features @ W_star.detach() + b_star.detach()
-    loss = F.cross_entropy(logits, y)
+    logits = features @ model.W + model.b
+    loss = F.cross_entropy(logits, y) + 0.5 * ridge * model.W.square().sum()
+    if regularize_bias:
+        loss = loss + 0.5 * ridge * model.b.square().sum()
     loss.backward()
     optimizer.step()
     return loss.item()
@@ -299,6 +303,7 @@ def _wrapper_mse_step(model, optimizer, X, Y, ridge, loss_fn, one_pass, regulari
         pred = design @ (W_full if implicit_readout_gradient else W_full.detach())
         loss = (loss_fn or mse_loss)(pred, Y)
         loss.backward()
+        _clear_wrapper_grad(model)
         optimizer.step()
         if project_after_step:
             _project_wrapper(model, X, Y, ridge, regularize_bias)
@@ -309,6 +314,7 @@ def _wrapper_mse_step(model, optimizer, X, Y, ridge, loss_fn, one_pass, regulari
     pred = model(X)
     loss = (loss_fn or mse_loss)(pred, Y)
     loss.backward()
+    _clear_wrapper_grad(model)
     optimizer.step()
     if project_after_step:
         _project_wrapper(model, X, Y, ridge, regularize_bias)
@@ -316,6 +322,7 @@ def _wrapper_mse_step(model, optimizer, X, Y, ridge, loss_fn, one_pass, regulari
 
 
 def _wrapper_sparse_step(model, optimizer, X, Y, ridge, sparsity, penalty, loss_fn, max_iter, tol, regularize_bias, one_pass, project_after_step, implicit_readout_gradient, solver):
+    _require_optimizer_params(optimizer, model.W, model.b)
     if one_pass:
         optimizer.zero_grad(set_to_none=True)
         features = model.feature_net(X)
@@ -330,9 +337,11 @@ def _wrapper_sparse_step(model, optimizer, X, Y, ridge, sparsity, penalty, loss_
             solver=solver,
         )
         _set_wrapper_readout(model, W_full)
-        design = augment_features(features, bias=model.bias)
-        pred = design @ (W_full if implicit_readout_gradient else W_full.detach())
+        pred = model(X)
         loss = (loss_fn or mse_loss)(pred, Y)
+        loss = loss + _sparse_readout_penalty(model.W, ridge, sparsity, penalty)
+        if model.bias and regularize_bias:
+            loss = loss + 0.5 * ridge * model.b.square().sum()
         loss.backward()
         optimizer.step()
         if project_after_step:
@@ -343,6 +352,9 @@ def _wrapper_sparse_step(model, optimizer, X, Y, ridge, sparsity, penalty, loss_
     optimizer.zero_grad(set_to_none=True)
     pred = model(X)
     loss = (loss_fn or mse_loss)(pred, Y)
+    loss = loss + _sparse_readout_penalty(model.W, ridge, sparsity, penalty)
+    if model.bias and regularize_bias:
+        loss = loss + 0.5 * ridge * model.b.square().sum()
     loss.backward()
     optimizer.step()
     if project_after_step:
@@ -359,6 +371,7 @@ def _wrapper_incremental_step(model, optimizer, X, Y, state, loss_fn, project_af
     pred = augment_features(features, bias=model.bias) @ W_full.detach()
     loss = (loss_fn or mse_loss)(pred, Y)
     loss.backward()
+    _clear_wrapper_grad(model)
     optimizer.step()
     if project_after_step:
         with torch.no_grad():
@@ -375,6 +388,7 @@ def _wrapper_proximal_step(model, optimizer, X, Y, state, loss_fn, project_after
     pred = augment_features(features, bias=model.bias) @ W_full.detach()
     loss = (loss_fn or mse_loss)(pred, Y)
     loss.backward()
+    _clear_wrapper_grad(model)
     optimizer.step()
     if project_after_step:
         with torch.no_grad():
@@ -424,6 +438,7 @@ def _final_linear_mse_step(model, optimizer, X, Y, ridge, loss_fn, one_pass, reg
 def _final_linear_sparse_step(model, optimizer, X, Y, ridge, sparsity, penalty, loss_fn, max_iter, tol, regularize_bias, one_pass, project_after_step, implicit_readout_gradient, solver):
     phi, readout = _split_final_linear(model)
     has_bias = readout.bias is not None
+    _require_optimizer_params(optimizer, readout.weight, readout.bias)
 
     if one_pass:
         optimizer.zero_grad(set_to_none=True)
@@ -439,10 +454,12 @@ def _final_linear_sparse_step(model, optimizer, X, Y, ridge, sparsity, penalty, 
             solver=solver,
         )
         _set_linear_readout(readout, W_full)
-        pred = augment_features(features, bias=has_bias) @ (W_full if implicit_readout_gradient else W_full.detach())
+        pred = readout(features)
         loss = (loss_fn or mse_loss)(pred, Y)
+        loss = loss + _sparse_readout_penalty(readout.weight, ridge, sparsity, penalty)
+        if has_bias and regularize_bias:
+            loss = loss + 0.5 * ridge * readout.bias.square().sum()
         loss.backward()
-        _clear_linear_grad(readout)
         optimizer.step()
         if project_after_step:
             _project_final_linear_sparse(phi, readout, X, Y, ridge, sparsity, penalty, max_iter, tol, regularize_bias)
@@ -452,8 +469,10 @@ def _final_linear_sparse_step(model, optimizer, X, Y, ridge, sparsity, penalty, 
     optimizer.zero_grad(set_to_none=True)
     pred = model(X)
     loss = (loss_fn or mse_loss)(pred, Y)
+    loss = loss + _sparse_readout_penalty(readout.weight, ridge, sparsity, penalty)
+    if has_bias and regularize_bias:
+        loss = loss + 0.5 * ridge * readout.bias.square().sum()
     loss.backward()
-    _clear_linear_grad(readout)
     optimizer.step()
     if project_after_step:
         _project_final_linear_sparse(phi, readout, X, Y, ridge, sparsity, penalty, max_iter, tol, regularize_bias)
@@ -604,6 +623,29 @@ def _clear_linear_grad(readout):
     readout.weight.grad = None
     if readout.bias is not None:
         readout.bias.grad = None
+
+
+def _clear_wrapper_grad(model):
+    model.W.grad = None
+    if model.b is not None:
+        model.b.grad = None
+
+
+def _require_optimizer_params(optimizer, *params):
+    optimized = {id(param) for group in optimizer.param_groups for param in group["params"]}
+    missing = [param for param in params if param is not None and id(param) not in optimized]
+    if missing:
+        raise ValueError(
+            "The outer optimizer must include the readout parameters for non-ridge VarPro. "
+            "Construct it with model.parameters()."
+        )
+
+
+def _sparse_readout_penalty(W, ridge, sparsity, penalty):
+    value = 0.5 * ridge * W.square().sum()
+    if penalty == "l1":
+        return value + sparsity * W.abs().sum()
+    return value + sparsity * torch.sqrt(W.abs() + 1e-8).sum()
 
 
 def _resolve_device(model, device):
