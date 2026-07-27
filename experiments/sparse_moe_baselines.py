@@ -1,7 +1,4 @@
-"""Reproduce the sparse-MoE table used in the reviewer response.
-
-This is an experiment/reproducibility test, not a short unit test. Defaults
-match the submitted table exactly:
+"""Run the sparse-MoE baseline comparison.
 
 * MNIST: 3,000 training and 1,000 test examples;
 * dense soft-gated MoE with h=32 and k=4;
@@ -13,12 +10,11 @@ match the submitted table exactly:
 Install the experiment dependencies and run:
 
     pip install numpy torchvision
-    python tests/reproduce_sparse_moe_reviewer_table.py \
-        --output-dir results/sparse_moe_reviewer
+    python experiments/sparse_moe_baselines.py
 
 For a fast code-path check:
 
-    python tests/reproduce_sparse_moe_reviewer_table.py \
+    python experiments/sparse_moe_baselines.py \
         --methods varpro_sparse_l1 joint_mse_prox_l1 \
         --epochs 2 --seeds 1 --output-dir /tmp/sparse_moe_smoke
 """
@@ -582,7 +578,7 @@ def write_summary(
     target_accuracy: float,
 ) -> None:
     summary_rows = []
-    with (output_dir / "sparse_moe_reviewer_summary.csv").open(
+    with (output_dir / "sparse_moe_summary.csv").open(
         "w",
         newline="",
     ) as handle:
@@ -644,7 +640,7 @@ def write_summary(
             summary_rows.append(summary)
 
     lines = [
-        "# Sparse MoE reviewer-response reproduction",
+        "# Sparse MoE baseline comparison",
         "",
         "MNIST, n_train=3,000, n_test=1,000, h=32, k=4, "
         "Adam, 100 epochs, five seeds.",
@@ -681,7 +677,7 @@ def write_summary(
                 ),
             )
         )
-    (output_dir / "sparse_moe_reviewer_table.md").write_text(
+    (output_dir / "sparse_moe_table.md").write_text(
         "\n".join(lines) + "\n"
     )
 
@@ -699,7 +695,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("results/sparse_moe_reviewer"),
+        default=Path("results/sparse_moe_baselines"),
     )
     parser.add_argument(
         "--methods",
@@ -715,7 +711,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.data_dir.mkdir(parents=True, exist_ok=True)
     results = []
-    raw_path = args.output_dir / "sparse_moe_reviewer_raw.csv"
+    raw_path = args.output_dir / "sparse_moe_raw.csv"
     with raw_path.open("w", newline="") as handle:
         writer = csv.DictWriter(
             handle,
@@ -754,8 +750,8 @@ def main() -> None:
                 )
     write_summary(results, methods, args.output_dir, args.target_accuracy)
     print(f"Wrote {raw_path}")
-    print(f"Wrote {args.output_dir / 'sparse_moe_reviewer_summary.csv'}")
-    print(f"Wrote {args.output_dir / 'sparse_moe_reviewer_table.md'}")
+    print(f"Wrote {args.output_dir / 'sparse_moe_summary.csv'}")
+    print(f"Wrote {args.output_dir / 'sparse_moe_table.md'}")
 
 
 if __name__ == "__main__":
