@@ -233,6 +233,21 @@ python -m pytest tests/ -v
 python tests/test_torch_varpro.py
 ```
 
+### Reproducing the reviewer sparse-MoE table
+
+The complete experiment is kept separate from the fast unit tests:
+
+```bash
+pip install numpy torchvision
+python tests/reproduce_sparse_moe_reviewer_table.py \
+    --output-dir results/sparse_moe_reviewer
+```
+
+The default command reproduces the reported protocol: MNIST with 3,000
+training and 1,000 test samples, the dense MoE with `h=32` and `k=4`, Adam for
+100 epochs, five seeds, and 100 proximal iterations for sparse readouts. It
+writes the per-epoch measurements, aggregate CSV, and final Markdown table.
+
 ---
 
 ## Algorithm summary

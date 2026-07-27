@@ -1,5 +1,7 @@
 """Stateful readout trackers for mini-batch VarPro."""
 
+from __future__ import annotations
+
 from collections import deque
 
 import torch
